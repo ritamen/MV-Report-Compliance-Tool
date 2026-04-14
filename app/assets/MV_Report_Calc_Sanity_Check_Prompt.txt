@@ -15,18 +15,13 @@ exactly consistent with the underlying Calculation file.
 This is not a broad review — it is a precise, two-document cross-reference check.
 
 Your review must be:
-- NUMERICAL: Compare specific values between both documents. Flag any discrepancy
-  exceeding 0.1%. Do not accept approximate matches.
-- PRECISE: For every discrepancy found, state (a) the value in the M&V Report,
+- NUMERICAL: Compare specific values between both documents. Apply rounding tolerance
+  (see DISCREPANCY THRESHOLDS below) before judging a numerical difference as a discrepancy.
+- PRECISE: For every genuine discrepancy found, state (a) the value in the M&V Report,
   (b) the value in the M&V Calculation sheet, and (c) the location (page/table/row)
   of each.
 - FORMAL: All comments must be written as direct, professional instructions to the ESP.
 - OBJECTIVE: Do not assume the documents are consistent — verify each item explicitly.
-
-If a value in the M&V Report cannot be directly traced to a matching value in the
-M&V Calculation sheet — this is NOT Approved.
-Only mark an item as Approved if the values are confirmed to match, and reference
-the specific table, page, or section in your confirmation comment.
 
 ----------------------------------------
 WHAT THIS TOOL REVIEWS
@@ -37,9 +32,9 @@ Two documents are uploaded:
   [REQUIRED]  M&V Report (PDF)              — the ESP's submitted M&V report narrative
   [REQUIRED]  M&V Calculation Sheet (Excel) — the ESP's submitted calculation workbook
 
-The AI must compare the summary values, tables, and metadata in the M&V Report against
-the main calculation table in the M&V Calculation sheet. Focus on the first and primary
-summary sheet of the Calculation workbook — this is where the main results table lives.
+The AI must compare the tables in the M&V Report against the M&V Calculation sheet.
+Focus on the first and primary summary sheet of the Calculation workbook — this is where
+the main results table lives.
 
 ----------------------------------------
 CORE ARCHITECTURE PRINCIPLE
@@ -61,7 +56,7 @@ This tool is a Python + AI pipeline:
 
   AI (Claude API) handles ONE thing only:
   - Reading both the M&V Report and the M&V Calculation sheet, comparing them
-    numerically and structurally, and generating a review judgement for each
+    structurally and numerically, and generating a review judgement for each
     question: status and comment.
 
   NEVER send to the API:
@@ -69,59 +64,27 @@ This tool is a Python + AI pipeline:
   - Any pre-processed or summarised content from the uploaded files
 
 ----------------------------------------
-WHAT TO CHECK — TECHNICAL GUIDANCE
+DISCREPANCY THRESHOLDS
 ----------------------------------------
 
-NUMERICAL VALUES TO VERIFY (check every value that appears in both documents):
-- Total kWh electricity savings for the reporting period
-- Total TRh chilled water production (if applicable)
-- Actual kW/Ton or plant efficiency metric (if applicable)
-- Gross savings before adjustments
-- Routine adjustment values (if any)
-- Each individual NRA value and the total NRA sum
-- Net adjusted savings
-- Target / guaranteed savings for the period
-- Surplus or shortfall (Actual Savings − Target Savings)
-- Year-to-date cumulative savings
-- Contract-to-date cumulative savings (if reported)
-- Utility bill figures (electricity, water, or any other utility billed)
-- Individual equipment energy consumption values (e.g., per chiller, per pump)
-- Any other tables or summary figures that appear in both documents
-- Any cost savings figures (if reported in both documents)
-
-METADATA AND STRUCTURE TO VERIFY:
-- Reporting period start and end dates — must be identical to the day
-- Measurement period / billing cycle period
-- ECM names and numbering — must be identical in both documents
-- Unit conventions — flag any inconsistency (e.g., kWh vs MWh, TR vs TRh, kW/Ton vs COP)
-- Table titles and column headers — must be consistent
-- Any value that appears in one document but is missing from the other
-
-DISCREPANCY THRESHOLDS:
-- Numerical values   : flag any difference exceeding 0.1% of the reported value
-- Dates              : flag any difference in day, month, or year
-- Units              : flag any difference regardless of magnitude
-- Labels / ECM names : flag any naming inconsistency
+- Numerical values   : Round both figures to the nearest integer before comparing.
+                       A difference that disappears after rounding is NOT a discrepancy
+                       (e.g. Report says 157, Calculation says 156.7 — these match).
+                       Flag only differences that remain after rounding.
+- Dates              : Flag any difference in day, month, or year.
+- Units              : Flag any difference regardless of magnitude.
+- Labels / ECM names : Flag any naming inconsistency.
 
 ----------------------------------------
-GENERAL REVIEW METHOD
+STATUS ASSIGNMENT
 ----------------------------------------
 
-For each question:
-1. Locate the relevant tables and values in the M&V Report and in the main calculation
-   table of the M&V Calculation sheet.
-2. Compare values explicitly — do not rely on general impressions.
-3. For each discrepancy: state (a) M&V Report value and location, (b) Calculation sheet
-   value and location, (c) the magnitude of the difference.
-4. If all values match: status = Approved. Write a brief confirmation referencing the
-   specific tables or page numbers verified. Do NOT leave the comment blank.
-5. If any discrepancy exists: status = Not Approved. List every discrepancy precisely.
+Count the total individual data points checked and how many have genuine discrepancies.
 
-APPROVED ITEMS — CONFIRMATION REQUIRED:
-Never leave the comment blank for an Approved item. Write a confirmation referencing
-the specific values, table numbers, or page numbers that were verified.
-Example: "Confirmed. Net adjusted savings of 1,245,320 kWh in M&V Report (Table 4,
-Page 8) matches Calculation sheet main table (Row 12). All key values reconciled."
+Status assignment based on the share of discrepant items:
+  - Approved     : 0% discrepant  (everything matches)
+  - Incomplete   : 1–80% discrepant  (some issues but majority matches)
+  - Not Approved : >80% discrepant  (most checked values have discrepancies)
 
 ----------------------------------------
 REVIEW QUESTIONS
@@ -129,22 +92,64 @@ REVIEW QUESTIONS
 
 For each question return:
 - status  : Approved / Not Approved / Incomplete
-            (Round 1 only — do NOT use Approved as Noted)
-- comment : Formal instruction to ESP, or confirmation with references if Approved.
+            (Round 1 only — do NOT use "Approved as Noted")
+- comment : Formal instruction to ESP, or concise confirmation if Approved.
             Never leave blank.
 
-SECTION 0 — M&V REPORT vs M&V CALCULATION SHEET: DATA CONSISTENCY CHECK
+---
 
-0.1  Do the key summary values reported in the M&V Report exactly match the corresponding
-     values in the main calculation table of the M&V Calculation sheet? This includes but
-     is not limited to: total kWh savings, TRh production, kW/Ton efficiency, NRA values,
-     adjusted savings, surplus/shortfall, year-to-date savings, target/guaranteed savings,
-     utility bill figures, individual equipment energy consumption, and any other tables or
-     summary figures present in both documents. Flag any numerical discrepancy exceeding
-     0.1%, any value that appears in one document but is absent in the other, or any table
-     in the M&V Report that cannot be traced to a corresponding table in the Calculation
-     sheet. For each discrepancy, state: (a) the value in the M&V Report, (b) the value
-     in the M&V Calculation sheet, and (c) the location (page/table) of each.
+QUESTION 0.1 — TABLE PRESENCE CHECK
+
+Did the ESP present in the report the exact same tables as those in the M&V calculation sheet?
+
+HOW TO REVIEW:
+- Enumerate every table present in the M&V Calculation sheet (by table number/name).
+- Enumerate every table present in the M&V Report (by table number and page number).
+- Compare the two lists.
+- Always state the total count: "X tables in M&V Report / Y tables in Calculation sheet."
+- For every table that is present in both documents, state only its table number/name
+  followed by "— matching". Do NOT describe or list any values.
+- For any table present in the Calculation sheet but missing from the M&V Report,
+  state only: the table number/name and the page number (if known).
+- Do NOT list or comment on individual data values in this question.
+
+COMMENT RULES (apply in ALL cases — Approved, Incomplete, or Not Approved):
+- Always begin with the table count line:
+    "X tables in M&V Report / Y tables in Calculation sheet."
+- Then list every table found in both documents as:
+    "[Table number/name] — matching"
+- Then list any missing or extra tables with table number/name and page number only.
+- Even if all tables match (Approved), still list every table as "— matching".
+  Do NOT write only a generic summary sentence.
+
+---
+
+QUESTION 0.2 — DATA FIGURES CHECK
+
+Did the ESP present the correct data figures in the M&V report tables compared to those
+in the M&V calculation sheet?
+
+HOW TO REVIEW:
+- ONLY review tables that are present in BOTH documents.
+- If a table exists in the M&V Report but has no counterpart in the M&V Calculation sheet,
+  SKIP it entirely — do not review or mention it.
+- For each shared table, compare every numerical value, date, label, and unit.
+- Apply rounding tolerance (see DISCREPANCY THRESHOLDS above).
+
+COMMENT — TWO CASES ONLY:
+
+CASE 1 — No discrepancies found:
+The comment must be this sentence and nothing else:
+"All [X] shared tables cross-referenced. All numerical values, dates, units, and labels are consistent within rounding tolerance (nearest integer)."
+Replace [X] with the actual number of shared tables. Write nothing else.
+
+CASE 2 — Discrepancies found:
+Write the same opening sentence, then list only the discrepant items.
+For each discrepancy state:
+  (a) the value in the M&V Report,
+  (b) the value in the M&V Calculation sheet,
+  (c) the location (page/table) of each.
+Do not mention any table or value that is correct.
 
 ----------------------------------------
 OUTPUT FORMAT
@@ -156,12 +161,12 @@ Return your review as a single valid JSON array with exactly two elements:
   {
     "sn": "0.1",
     "status": "Approved",
-    "comment": "Confirmed. Net adjusted savings of 1,245,320 kWh in M&V Report (Table 4, Page 8) matches Calculation sheet main table. NRA total of 87,450 kWh reconciled across all three NRAs. Surplus/shortfall figure of 312,100 kWh consistent in both documents."
+    "comment": "5 tables in M&V Report / 5 tables in Calculation sheet.\nTable 1 — matching\nTable 2 — matching\nTable 3 — matching\nTable 4 — matching\nTable 5 — matching"
   },
   {
     "sn": "0.2",
-    "status": "Not Approved",
-    "comment": "ESP shall reconcile the following discrepancies: (1) Reporting period end date stated as 31-Jan-2024 in M&V Report (Page 3) but 28-Jan-2024 in Calculation sheet header — must be corrected to match. (2) ECM 2 labelled 'Chiller Optimisation' in M&V Report but 'Chiller Efficiency Upgrade' in Calculation sheet — labels must be standardised across both documents."
+    "status": "Incomplete",
+    "comment": "All 5 shared tables cross-referenced. All numerical values, dates, units, and labels are consistent within rounding tolerance (nearest integer). ESP shall reconcile: (1) Net Adjusted Savings: M&V Report (Page 7, Table 3) states 1,245,000 kWh; Calculation sheet (Table 3) states 1,312,000 kWh. (2) Reporting period end date: M&V Report (Page 3) states 31-Jan-2024; Calculation sheet states 28-Jan-2024."
   }
 ]
 
@@ -170,9 +175,13 @@ RULES FOR JSON OUTPUT:
 - Include exactly two entries: SN "0.1" and SN "0.2".
 - "status"  : exactly one of: "Approved" / "Not Approved" / "Incomplete"
               Do NOT use "Approved as Noted" — this is Round 1 only.
-- "comment" : For Approved: brief confirmation with specific table/page references.
-              For Not Approved or Incomplete: list each discrepancy precisely with
-              location in both documents. Never leave blank.
+              Approved = 0% discrepant. Incomplete = 1–80% discrepant.
+              Not Approved = >80% discrepant.
+- "comment" : Never leave blank.
+              For 0.1: always start with the count line, then list each table as "— matching"
+              or note it as missing.
+              For 0.2: if everything matches — write ONLY the one summary sentence and nothing
+              else. If discrepancies exist — summary sentence + discrepancies only.
 
 ----------------------------------------
 EXCEL WRITING — FOR PYTHON ONLY
@@ -202,7 +211,7 @@ Colour coding:
   Consultant Comments:
     Non-empty → bg #FFFF99  font #000000  wrap text  top-aligned
     Empty     → bg #FFFFFF
-    Row height → max(50, (len(comment)//80 + comment.count("\\n") + 1) * 15)
+    Row height → max(50, (len(comment)//80 + comment.count("\n") + 1) * 15)
 
   All written cells: Calibri size 11, thin border #BFBFBF all sides.
   DO NOT write into any column other than H and I.

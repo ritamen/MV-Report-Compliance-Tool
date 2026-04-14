@@ -97,8 +97,237 @@ def _xlsx_to_text(xlsx_bytes: bytes) -> str:
             parts.append(",".join("" if v is None else str(v) for v in row))
     return "\n".join(parts)
 
-def _build_user_content(pdf_bytes: bytes, xlsx_bytes: bytes) -> list:
-    calc_text = _xlsx_to_text(xlsx_bytes)
+def _scan_xlsx_for_metadata(xlsx_bytes: bytes) -> dict:
+    """
+    Scan the Excel file header rows directly with openpyxl.
+    Looks for labelled cells like 'Client:', 'ESP:', 'Prepared for:' etc.
+
+    Strategy:
+    - Iterate the first 40 rows of the first sheet using cell objects (not
+      values_only) so we can look ahead to the row below.
+    - For each cell whose text contains a known keyword, check BOTH the cell
+      to the right (same row, next column) AND the cell directly below (same
+      column, next row).  The first non-empty value wins.
+    - Additionally scan rows 1-20 for any cell that looks like a company name
+      and collect those as candidates (stored under "company_candidates").
+
+    Returns a partial dict with client_name, facility_name, country, esp_name
+    and company_candidates populated where found.
+    """
+    import openpyxl
+    import re
+    result = {}
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+        ws = wb.worksheets[0]
+
+        label_map = {
+            "client": "client_name",
+            "owner": "client_name",
+            "prepared for": "client_name",
+            "submitted to": "client_name",
+            "esp": "esp_name",
+            "contractor": "esp_name",
+            "prepared by": "esp_name",
+            "submitted by": "esp_name",
+            "energy service": "esp_name",
+            "facility": "facility_name",
+            "site": "facility_name",
+            "project": "facility_name",
+            "plant": "facility_name",
+            "building": "facility_name",
+            "country": "country",
+        }
+
+        # Build a list-of-lists of cell objects for rows 1-40 so we can look
+        # at the row below without a second pass.
+        max_row = min(ws.max_row or 40, 40)
+        rows = []
+        for row in ws.iter_rows(min_row=1, max_row=max_row):
+            rows.append(list(row))
+
+        company_keywords = re.compile(
+            r"\b(LLC|Ltd|Inc|Co\.|Authority|Corporation|Corp|Group|Energy|Services|Solutions|Associates|Partners|International)\b",
+            re.IGNORECASE,
+        )
+
+        company_candidates = []
+
+        for ri, row in enumerate(rows):
+            for ci, cell in enumerate(row):
+                raw = cell.value
+                if raw is None:
+                    continue
+                cell_str = str(raw).strip()
+                if not cell_str:
+                    continue
+                cell_lower = cell_str.lower().rstrip(":").strip()
+
+                # ── keyword label matching ────────────────────────────────────
+                for keyword, field in label_map.items():
+                    if keyword in cell_lower and field not in result:
+                        value = None
+                        # 1) cell to the right in the same row
+                        if ci + 1 < len(row):
+                            right = row[ci + 1].value
+                            if right is not None and str(right).strip():
+                                value = str(right).strip()
+                        # 2) cell directly below (same column, next row)
+                        if not value and ri + 1 < len(rows):
+                            below = rows[ri + 1][ci].value
+                            if below is not None and str(below).strip():
+                                value = str(below).strip()
+                        if value:
+                            result[field] = value
+                        break
+
+                # ── company-name candidate collection (rows 1-20 only) ────────
+                if ri < 20:
+                    word_count = len(cell_str.split())
+                    is_numeric = False
+                    try:
+                        float(cell_str.replace(",", "").replace("%", ""))
+                        is_numeric = True
+                    except ValueError:
+                        pass
+                    if not is_numeric and (
+                        word_count > 3 or company_keywords.search(cell_str)
+                    ):
+                        if cell_str not in company_candidates:
+                            company_candidates.append(cell_str)
+
+        if company_candidates:
+            result["company_candidates"] = company_candidates
+
+        wb.close()
+    except Exception as e:
+        logging.warning("xlsx scan failed: %s", e)
+    return result
+
+
+def _extract_from_filename(*filenames: str) -> dict:
+    """
+    Parse year_number, period_type, period_number from one or more filenames.
+
+    Handles patterns like:
+      Y1, Y2, Year1, Year_1, YEAR-2
+      Q1, Q2, Quarter1, Quarter_2, Q_3
+      M1, M3, M12, Month1, Month_3, MONTH-12
+      Combined: Y1Q2, Y2_M3, Y1-Q4
+    """
+    result = {}
+    for filename in filenames:
+        name = re.sub(r'\.[^.]+$', '', filename).upper()   # strip extension, uppercase
+        name = re.sub(r'[_\-\s]+', '_', name)              # normalise separators
+
+        # ── Year ──────────────────────────────────────────────────────────────
+        if "year_number" not in result:
+            m = re.search(r'(?<![A-Z0-9])Y(?:EAR)?_?(\d{1,2})(?![0-9])', name)
+            if m:
+                result["year_number"] = int(m.group(1))
+
+        # ── Quarter ───────────────────────────────────────────────────────────
+        if "period_type" not in result:
+            m = re.search(r'(?<![A-Z0-9])Q(?:UARTER)?_?([1-4])(?![0-9])', name)
+            if m:
+                result["period_type"]   = "Q"
+                result["period_number"] = int(m.group(1))
+
+        # ── Month (only if no quarter already found) ──────────────────────────
+        if "period_type" not in result:
+            m = re.search(r'(?<![A-Z0-9])M(?:ONTH)?_?(1[0-2]|[1-9])(?![0-9])', name)
+            if m:
+                result["period_type"]   = "M"
+                result["period_number"] = int(m.group(1))
+
+        if len(result) == 3:   # found everything — no need to check more files
+            break
+
+    return result
+
+
+def _extract_metadata(calc_text: str, pdf_bytes: bytes) -> dict:
+    """
+    Extract submission metadata from the uploaded documents.
+    Step 1: direct openpyxl scan of Excel header rows (fast, no API).
+    Step 2: Haiku AI call on PDF + Excel text to fill in remaining fields.
+    """
+    import anthropic
+
+    # ── Step 1: fast openpyxl scan ────────────────────────────────────────────
+    # Re-encode calc_text back from the string is complex; use raw bytes directly
+    # The xlsx bytes are passed separately via run_sanity_check but here we only
+    # have calc_text. Haiku handles the rest.
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {}
+
+    # ── Step 2: extract full PDF text (up to 10 pages) ────────────────────────
+    pdf_text = ""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        for page in list(reader.pages)[:10]:
+            pdf_text += (page.extract_text() or "") + "\n"
+    except Exception as e:
+        logging.warning("pypdf failed: %s", e)
+
+    combined = (
+        f"=== M&V REPORT (first 10 pages, full text) ===\n{pdf_text[:12000]}\n\n"
+        f"=== M&V CALCULATION SHEET (Excel, full text) ===\n{calc_text[:12000]}"
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "You are extracting metadata from an M&V (Measurement & Verification) "
+                    "document package. Read ALL the text below carefully and extract every "
+                    "field you can find.\n\n"
+                    "Return ONLY a valid JSON object with these exact keys:\n"
+                    "{\n"
+                    '  "client_name": "the organisation that commissioned the work / the owner / '
+                    'the government entity / the building owner — NOT the ESP",\n'
+                    '  "facility_name": "name of the facility, building, or plant",\n'
+                    '  "country": "country where the facility is located",\n'
+                    '  "esp_name": "name of the Energy Service Provider / contractor / '
+                    'the company that prepared the report",\n'
+                    '  "project_name": "specific plant or tower name (e.g. Al Ain Plant)",\n'
+                    '  "mv_option": "Option A or B or C or C - Mean Model or D, or empty string",\n'
+                    '  "reporting_period_start": "dd/mm/yyyy or empty string",\n'
+                    '  "reporting_period_end": "dd/mm/yyyy or empty string",\n'
+                    '  "year_number": integer or null,\n'
+                    '  "period_type": "M or Q or null",\n'
+                    '  "period_number": integer or null\n'
+                    "}\n\n"
+                    "SEARCH HINTS — look for:\n"
+                    "- Cover page, title page, header rows of the Excel\n"
+                    "- 'Prepared for', 'Client', 'Owner', 'Submitted to' → client_name\n"
+                    "- 'Prepared by', 'ESP', 'Contractor', 'Submitted by' → esp_name\n"
+                    "- Project title, facility name, building name → facility_name\n"
+                    "- Any country or location mentioned\n"
+                    "- Reporting period dates (start and end)\n"
+                    "- Year number (Y1, Y2, Year 1, Year 4 etc.)\n\n"
+                    "Use empty string for any text field not found. "
+                    "Return ONLY the JSON, no explanation.\n\n"
+                    f"{combined}"
+                ),
+            }],
+        )
+        raw = response.content[0].text.strip()
+        logging.info("Haiku response: %s", raw[:600])
+        return json.loads(_strip_fences(raw))
+    except Exception as e:
+        logging.warning("Metadata extraction API call failed: %s", e)
+        return {"_error": str(e)}
+
+
+def _build_user_content(pdf_bytes: bytes, calc_text: str) -> list:
     return [
         {
             "type": "document",
@@ -111,7 +340,7 @@ def _build_user_content(pdf_bytes: bytes, xlsx_bytes: bytes) -> list:
         },
         {
             "type": "text",
-            "text": f"M&V Calculation Sheet (converted from Excel):\n\n{calc_text}",
+            "text": f"M&V Calculation Sheet (full text extracted from Excel):\n\n{calc_text}",
         },
         {
             "type": "text",
@@ -161,15 +390,43 @@ def _call_claude_retry(client, user_content: list, first_raw: str) -> str:
     )
     return _extract_json_text(response)
 
-def run_sanity_check(pdf_bytes: bytes, xlsx_bytes: bytes, pdf_filename: str):
+def run_sanity_check(pdf_bytes: bytes, xlsx_bytes: bytes, pdf_filename: str,
+                     xlsx_filename: str = "", submission_details: dict = None):
     import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
 
+    # Extract calc text once — used for both API call and metadata extraction
+    calc_text = _xlsx_to_text(xlsx_bytes)
+
+    # Step 1: fast openpyxl scan of Excel header rows
+    meta = _scan_xlsx_for_metadata(xlsx_bytes)
+    # Step 2: Haiku fills in anything not found by the direct scan
+    haiku_meta = _extract_metadata(calc_text, pdf_bytes)
+    # Merge: direct scan takes priority; Haiku fills gaps
+    for k, v in haiku_meta.items():
+        if v and not meta.get(k):
+            meta[k] = v
+
+    # Step 3: filename parsing — most reliable source for year / period fields;
+    # overrides AI/scan results for those specific keys
+    fn_meta = _extract_from_filename(pdf_filename, xlsx_filename or "")
+    for k, v in fn_meta.items():
+        if v is not None:
+            meta[k] = v
+
+    logging.info("Extracted metadata: %s", meta)
+
+    # Manual submission details override auto-extracted values
+    if submission_details:
+        for key, val in submission_details.items():
+            if val:
+                meta[key] = val
+
     client = anthropic.Anthropic(api_key=api_key)
-    user_content = _build_user_content(pdf_bytes, xlsx_bytes)
+    user_content = _build_user_content(pdf_bytes, calc_text)
 
     try:
         raw = _call_claude(client, user_content)
@@ -201,7 +458,7 @@ def run_sanity_check(pdf_bytes: bytes, xlsx_bytes: bytes, pdf_filename: str):
     incomplete   = sum(1 for it in items if it.get("status") == "Incomplete")
     total        = len(items)
 
-    filled_bytes = write_review(TEMPLATE_BYTES, review_by_sn)
+    filled_bytes = write_review(TEMPLATE_BYTES, review_by_sn, meta=meta)
 
     base_name = pdf_filename.replace(".pdf", "").replace(".PDF", "")
     output_filename = f"MV_Report_Sanity_Check_{base_name}.xlsx"
@@ -232,11 +489,60 @@ st.markdown(
       --ark-black: #000000;
     }
 
-    html, body, [class*="css"], * {
+    /* ── Global font enforcement ─────────────────────────────────────── */
+    html, body, :root, [class*="css"], * {
         font-family: "Trebuchet MS", Arial, sans-serif !important;
         color: var(--ark-black);
     }
-    button, input, textarea, select, label, p, div, span, li {
+    button, input, textarea, select, option,
+    label, p, div, span, li, a, h1, h2, h3, h4, h5, h6,
+    code, pre, small, strong, em, td, th {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* ── Streamlit widget-specific overrides ─────────────────────────── */
+    /* Selectbox — widget, dropdown list, options */
+    [data-testid="stSelectbox"] *,
+    [data-testid="stSelectbox"] select,
+    [data-baseweb="select"] *,
+    [data-baseweb="popover"] *,
+    [role="listbox"], [role="listbox"] *,
+    [role="option"],  [role="option"] * {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* Alerts / success / warning / error / info banners */
+    [data-testid="stAlert"] *,
+    [data-testid="stNotification"] *,
+    .stAlert *, .stSuccess *, .stWarning *,
+    .stError *, .stInfo * {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* Spinner */
+    [data-testid="stSpinner"] *, .stSpinner * {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* Download button */
+    [data-testid="stDownloadButton"] * {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* File uploader */
+    [data-testid="stFileUploader"] *,
+    [data-testid="stFileUploaderDropzone"] * {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* Markdown / text elements */
+    .stMarkdown *, .element-container * {
+        font-family: "Trebuchet MS", Arial, sans-serif !important;
+    }
+
+    /* Tooltip and popover overlays */
+    [data-baseweb="tooltip"] *,
+    [data-baseweb="menu"] * {
         font-family: "Trebuchet MS", Arial, sans-serif !important;
     }
 
@@ -263,8 +569,8 @@ st.markdown(
         background: linear-gradient(90deg,#060C2E 0%,#08133A 45%,#0B1A4A 100%);
     }
     .ark-nav-left { display:flex; align-items:center; gap:14px; }
-    .ark-nav-title { color:white !important; font-size:22px !important; font-weight:900; line-height:1.2; margin:0; }
-    .ark-nav-subtitle { color:rgba(255,255,255,0.65) !important; font-size:13px !important; font-weight:400; margin:0; }
+    .ark-nav-title { color:white !important; font-size:22px !important; font-weight:900; font-family:"Trebuchet MS",Arial,sans-serif !important; line-height:1.2; margin:0; }
+    .ark-nav-subtitle { color:rgba(255,255,255,0.65) !important; font-size:13px !important; font-weight:400; font-family:"Trebuchet MS",Arial,sans-serif !important; margin:0; }
     .ark-nav-right { display:flex; align-items:center; gap:10px; }
     .pill {
         border-radius:999px; padding:8px 14px; font-size:14px; font-weight:900;
@@ -289,6 +595,21 @@ st.markdown(
         display: none !important;
     }
 
+    /* Text inputs — grey style */
+    [data-testid="stTextInput"] input {
+        background-color: #e8e8e8 !important;
+        border: 1px solid #c8c8c8 !important;
+        border-radius: 6px !important;
+        color: #111 !important;
+        padding: 10px 12px !important;
+    }
+    [data-testid="stTextInput"] input:focus {
+        background-color: #e0e0e0 !important;
+        border-color: #0D6079 !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+
     label { font-size:15px !important; font-weight:700 !important; }
 
     div.stButton > button[kind="primary"],
@@ -306,9 +627,9 @@ st.markdown(
     }
     div.stButton > button[kind="primary"]:hover { background-color:var(--ark-blue) !important; color:#FFFFFF !important; }
 
-    .stat-card { background:white; border-radius:12px; padding:18px 16px; text-align:center; box-shadow:0 3px 10px rgba(0,0,0,0.06); margin-bottom:8px; }
-    .stat-number { font-size:36px; font-weight:900; line-height:1; margin-bottom:6px; }
-    .stat-label  { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:#555; }
+    .stat-card { background:white; border-radius:12px; padding:18px 16px; text-align:center; box-shadow:0 3px 10px rgba(0,0,0,0.06); margin-bottom:8px; font-family:"Trebuchet MS",Arial,sans-serif !important; }
+    .stat-number { font-size:36px; font-weight:900; line-height:1; margin-bottom:6px; font-family:"Trebuchet MS",Arial,sans-serif !important; }
+    .stat-label  { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:#555; font-family:"Trebuchet MS",Arial,sans-serif !important; }
     .color-blue   { color:#0D6079; }
     .color-green  { color:#375623; }
     .color-red    { color:#9C0006; }
@@ -317,6 +638,30 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# Enforce Trebuchet MS on every element — including React-rendered widgets
+st.markdown("""
+<script>
+(function enforceTrebuchet() {
+    const FONT = '"Trebuchet MS", Arial, sans-serif';
+    function applyFont(root) {
+        root.querySelectorAll('*').forEach(el => {
+            el.style.setProperty('font-family', FONT, 'important');
+        });
+    }
+    function run() {
+        try { applyFont(window.parent.document.body); } catch(e) {}
+        try { applyFont(window.top.document.body);    } catch(e) {}
+    }
+    run();
+    try {
+        new MutationObserver(run).observe(
+            window.parent.document.body, { childList: true, subtree: true }
+        );
+    } catch(e) {}
+})();
+</script>
+""", unsafe_allow_html=True)
 
 # Fix "uploadupload" icon text in file uploaders
 st.markdown("""
@@ -417,11 +762,103 @@ components.html("""
 </script>
 """, height=0)
 
+# ── Auto-extract submission details when both files are uploaded ───────────────
+# @st.cache_data caches by (calc_text, pdf_bytes) — same files = instant cache hit,
+# different files = fresh extraction.  The generation counter (_field_gen) changes
+# the widget key so Streamlit treats the inputs as brand-new and honours value=.
+
+_prefill = {"client_name": "", "facility_name": "", "country": "", "esp_name": ""}
+
+if report_upload is not None and calc_upload is not None:
+    _file_key = f"{report_upload.name}_{report_upload.size}|{calc_upload.name}_{calc_upload.size}"
+
+    if st.session_state.get("_meta_file_key") != _file_key:
+        with st.spinner("Extracting submission details from documents…"):
+            _pdf_data  = report_upload.read()
+            _xlsx_data = calc_upload.read()
+            report_upload.seek(0)
+            calc_upload.seek(0)
+            _calc_text = _xlsx_to_text(_xlsx_data)
+            # Step 1: fast direct scan of Excel header rows
+            _xlsx_scan = _scan_xlsx_for_metadata(_xlsx_data)
+            _prefill = dict(_xlsx_scan)
+            # Step 2: Haiku fills remaining gaps
+            _haiku = _extract_metadata(_calc_text, _pdf_data)
+            for _k, _v in _haiku.items():
+                if _v and not _prefill.get(_k):
+                    _prefill[_k] = _v
+
+        # Map period_type "M"/"Q" → "Month"/"Quarter" for the UI dropdown
+        _pt_raw = _prefill.get("period_type", "") or ""
+        _pt_ui  = "Month" if _pt_raw == "M" else ("Quarter" if _pt_raw == "Q" else "")
+
+        # Normalise mv_option to match the selectbox options list
+        _mv_raw = (_prefill.get("mv_option", "") or "").strip()
+        _MV_NORM = {
+            "option a": "Option A", "option b": "Option B",
+            "option c mean model": "Option C Mean Model",
+            "option c - mean model": "Option C Mean Model",
+            "option c": "Option C", "option d": "Option D",
+        }
+        _mv_ui = _MV_NORM.get(_mv_raw.lower(), _mv_raw if _mv_raw else "")
+
+        st.session_state["_meta_file_key"]       = _file_key
+        st.session_state["_prefill_client"]      = _prefill.get("client_name",   "")
+        st.session_state["_prefill_facility"]    = _prefill.get("facility_name", "")
+        st.session_state["_prefill_country"]     = _prefill.get("country",       "")
+        st.session_state["_prefill_esp"]         = _prefill.get("esp_name",      "")
+        st.session_state["_prefill_mv_option"]   = _mv_ui
+        st.session_state["_prefill_year_number"] = str(_prefill.get("year_number",   "") or "")
+        st.session_state["_prefill_period_type"] = _pt_ui
+        st.session_state["_prefill_period_num"]  = str(_prefill.get("period_number", "") or "")
+        # Bump generation → widget keys change → value= fires as first-render
+        st.session_state["_field_gen"] = st.session_state.get("_field_gen", 0) + 1
+        st.rerun()
+
+    else:
+        # Same files already extracted — read cached prefills from session state
+        _prefill = {
+            "client_name":   st.session_state.get("_prefill_client",   ""),
+            "facility_name": st.session_state.get("_prefill_facility", ""),
+            "country":       st.session_state.get("_prefill_country",  ""),
+            "esp_name":      st.session_state.get("_prefill_esp",      ""),
+        }
+else:
+    # One or both files removed — clear state and reset fields
+    if st.session_state.get("_meta_file_key"):
+        for _k in ("_meta_file_key", "_prefill_client", "_prefill_facility",
+                   "_prefill_country", "_prefill_esp", "_prefill_mv_option",
+                   "_prefill_year_number", "_prefill_period_type", "_prefill_period_num"):
+            st.session_state.pop(_k, None)
+        st.session_state["_field_gen"] = st.session_state.get("_field_gen", 0) + 1
+        st.rerun()
+
+_gen = st.session_state.get("_field_gen", 0)
+
+# ── Submission Details ────────────────────────────────────────────────────────
+st.markdown(
+    """
+    <div class="ark-section"><div class="ark-section-title">Submission details</div></div>
+    <div class="ark-section-rule"></div>
+    """,
+    unsafe_allow_html=True,
+)
+
+_sd_c1, _sd_c2, _sd_c3, _sd_c4 = st.columns(4)
+with _sd_c1:
+    client_name   = st.text_input("Client Name",   key=f"sd_client_{_gen}",   value=st.session_state.get("_prefill_client",   ""))
+with _sd_c2:
+    facility_name = st.text_input("Facility Name", key=f"sd_facility_{_gen}", value=st.session_state.get("_prefill_facility", ""))
+with _sd_c3:
+    country       = st.text_input("Country",       key=f"sd_country_{_gen}",  value=st.session_state.get("_prefill_country",  ""))
+with _sd_c4:
+    esp_name      = st.text_input("ESP's Name",    key=f"sd_esp_{_gen}",      value=st.session_state.get("_prefill_esp",      ""))
+
 # ── Run button ────────────────────────────────────────────────────────────────
 btn_left, btn_right = st.columns([7, 3])
 with btn_right:
     run_btn = st.button(
-        "Run Sanity Check",
+        "Generate Comments",
         type="primary",
         disabled=(report_upload is None or calc_upload is None),
         use_container_width=True,
@@ -444,14 +881,22 @@ if run_btn:
 
         log_box.info(
             f"Cross-referencing **{report_upload.name}** against "
-            f"**{calc_upload.name}** — both documents are being read in full by the AI…"
+            f"**{calc_upload.name}** "
         )
 
         with st.spinner(
             "Running sanity check — cross-referencing all key values between both documents… "
-            "(this typically takes 30–90 seconds)"
         ):
-            result = run_sanity_check(pdf_bytes, xlsx_bytes, report_upload.name)
+            result = run_sanity_check(
+                pdf_bytes, xlsx_bytes, report_upload.name,
+                xlsx_filename=calc_upload.name,
+                submission_details={
+                    "client_name":   client_name.strip(),
+                    "facility_name": facility_name.strip(),
+                    "country":       country.strip(),
+                    "esp_name":      esp_name.strip(),
+                },
+            )
 
         log_box.empty()
 
