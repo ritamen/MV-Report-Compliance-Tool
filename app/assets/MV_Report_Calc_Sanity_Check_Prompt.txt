@@ -102,23 +102,34 @@ QUESTION 0.1 — TABLE PRESENCE CHECK
 
 Did the ESP present in the report the exact same tables as those in the M&V calculation sheet?
 
+REVIEW DIRECTION: Calculation sheet → Report only.
+- A table present in the Calculation sheet but MISSING from the M&V Report = discrepancy. Flag it.
+- A table present in the M&V Report but NOT in the Calculation sheet = NOT a discrepancy. Do not flag it.
+  The M&V Report may legitimately contain additional supporting tables (e.g. annual guarantee
+  savings summaries, prior-year quarterly summaries, utility meter tables, appendix tables).
+  These are expected and must NOT be counted against the status.
+
 HOW TO REVIEW:
 - Enumerate every table present in the M&V Calculation sheet (by table number/name).
-- Enumerate every table present in the M&V Report (by table number and page number).
-- Compare the two lists.
+- Check whether each of those tables is also present in the M&V Report.
 - Always state the total count: "X tables in M&V Report / Y tables in Calculation sheet."
-- For every table that is present in both documents, state only its table number/name
-  followed by "— matching". Do NOT describe or list any values.
-- For any table present in the Calculation sheet but missing from the M&V Report,
-  state only: the table number/name and the page number (if known).
+- For every Calculation sheet table that is present in the M&V Report, state only its
+  table number/name followed by "— matching". Do NOT describe or list any values.
+- For any Calculation sheet table that is missing from the M&V Report, state only:
+  the table number/name.
 - Do NOT list or comment on individual data values in this question.
+- Do NOT flag or mention Report-only tables as issues.
 
 COMMENT RULES (apply in ALL cases — Approved, Incomplete, or Not Approved):
 - Always begin with the table count line:
     "X tables in M&V Report / Y tables in Calculation sheet."
-- Then list every table found in both documents as:
+- Then list every Calculation sheet table found in the M&V Report as:
     "[Table number/name] — matching"
-- Then list any missing or extra tables with table number/name and page number only.
+- Then list any Calculation sheet tables missing from the M&V Report.
+- If the M&V Report contains additional tables not in the Calculation sheet, add a single
+  note line: "Note: The M&V Report contains additional tables not present in the
+  Calculation sheet ([list them]). These are not flagged as discrepancies as the review
+  direction is Calculation sheet → Report only."
 - Even if all tables match (Approved), still list every table as "— matching".
   Do NOT write only a generic summary sentence.
 
