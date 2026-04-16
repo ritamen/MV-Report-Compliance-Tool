@@ -22,6 +22,8 @@ Your review must be:
   of each.
 - FORMAL: All comments must be written as direct, professional instructions to the ESP.
 - OBJECTIVE: Do not assume the documents are consistent — verify each item explicitly.
+- SPELLING VARIANTS: British vs. American spelling differences are not discrepancies and
+  must NOT be counted as incomplete or not approved findings.
 
 ----------------------------------------
 WHAT THIS TOOL REVIEWS
