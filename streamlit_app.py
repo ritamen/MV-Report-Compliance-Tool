@@ -97,6 +97,74 @@ def _xlsx_to_text(xlsx_bytes: bytes) -> str:
             parts.append(",".join("" if v is None else str(v) for v in row))
     return "\n".join(parts)
 
+def _extract_pdf_tables(pdf_bytes: bytes) -> str:
+    """Extract all tables from a PDF using pdfplumber (visual structure detection).
+
+    For each table, the nearest non-empty text line above it on the same page is
+    included as a label so unnamed tables can still be identified by the AI.
+    Returns a plain-text string of all tables formatted as markdown.
+    """
+    import pdfplumber
+
+    parts: list[str] = []
+    table_index = 0
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            tables = page.find_tables()
+            if not tables:
+                continue
+
+            # Extract all text words with their bounding boxes for label lookup
+            words = page.extract_words() or []
+
+            for table_obj in tables:
+                table_index += 1
+                bbox = table_obj.bbox  # (x0, top, x1, bottom)
+                table_top = bbox[1]
+
+                # Find the nearest text line strictly above the table bbox
+                # Group words into lines by their 'top' coordinate (within 3px)
+                lines: dict[float, list[str]] = {}
+                for w in words:
+                    # Only consider words above the table
+                    if w["bottom"] <= table_top:
+                        key = round(w["top"])
+                        lines.setdefault(key, []).append(w["text"])
+
+                label = ""
+                if lines:
+                    # Pick the line whose bottom edge is closest to the table top
+                    closest_top = max(
+                        (k for k in lines if k < table_top),
+                        default=None,
+                        key=lambda k: k,
+                    )
+                    if closest_top is not None:
+                        label = " ".join(lines[closest_top]).strip()
+
+                # Extract the table data
+                data = table_obj.extract()
+                if not data:
+                    continue
+
+                header = f"[Table {table_index} — Page {page_num}]"
+                if label:
+                    header += f" {label}"
+                parts.append(header)
+
+                # Format as markdown table
+                for row in data:
+                    cells = [str(c).strip() if c is not None else "" for c in row]
+                    parts.append("| " + " | ".join(cells) + " |")
+
+                parts.append("")  # blank line between tables
+
+    if not parts:
+        return "(No tables found in PDF)"
+    return "\n".join(parts)
+
+
 def _scan_xlsx_for_metadata(xlsx_bytes: bytes) -> dict:
     """
     Scan the Excel file header rows directly with openpyxl.
@@ -328,15 +396,11 @@ def _extract_metadata(calc_text: str, pdf_bytes: bytes) -> dict:
 
 
 def _build_user_content(pdf_bytes: bytes, calc_text: str) -> list:
+    pdf_tables = _extract_pdf_tables(pdf_bytes)
     return [
         {
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": "application/pdf",
-                "data": _encode_bytes(pdf_bytes),
-            },
-            "title": "M&V Report",
+            "type": "text",
+            "text": f"M&V Report — tables extracted from PDF:\n\n{pdf_tables}",
         },
         {
             "type": "text",
